@@ -182,6 +182,25 @@ describe('runOAuthFlow', () => {
         expect(validateToken).toHaveBeenCalledTimes(1)
     })
 
+    it('passes the scope the token endpoint granted to validateToken', async () => {
+        const validateToken = vi.fn(async () => alanGrant)
+        const { provider, getRedirect } = instrument({
+            exchangeCode: async () => ({ accessToken: 'tok-1', scope: 'data:read' }),
+            validateToken,
+        })
+
+        await runOAuthFlow<Account>(
+            flowOptions({
+                provider,
+                store: fakeStore(),
+                scopes: ['data:read_write'],
+                openBrowser: driveCallback(getRedirect),
+            }),
+        )
+
+        expect(validateToken).toHaveBeenCalledWith(expect.objectContaining({ scope: 'data:read' }))
+    })
+
     it('rejects with AUTH_CALLBACK_TIMEOUT when no callback arrives', async () => {
         const { provider } = instrument()
         const store = fakeStore()

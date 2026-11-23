@@ -798,7 +798,7 @@ Implement `AuthProvider` directly for device code, magic-link, username / passwo
 | `prepare?`      | Before the callback server binds   | Pre-flight (e.g. DCR to mint a `client_id`). The returned `handshake` is threaded into every later hook.                                                                                                  |
 | `authorize`     | After the callback server is up    | Build the URL the user opens. Returns the URL plus any handshake state needed at exchange (PKCE verifier, …).                                                                                             |
 | `exchangeCode`  | After the browser callback fires   | Trade the `code` for an `accessToken`. May also return the server-granted `scope` (so `validateToken` records the authoritative scope) and optionally a fully-resolved `account` to skip `validateToken`. |
-| `validateToken` | When `exchangeCode` had no account | Probe an authenticated endpoint to resolve the account.                                                                                                                                                   |
+| `validateToken` | When `exchangeCode` had no account | Probe an authenticated endpoint to resolve the account. Receives `exchangeCode`'s `scope` as `scope`, to record what was actually granted.                                                                |
 
 Skeleton:
 

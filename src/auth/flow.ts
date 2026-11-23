@@ -185,6 +185,7 @@ export async function runOAuthFlow<TAccount extends AuthAccount>(
             (await options.provider.validateToken({
                 token: exchange.accessToken,
                 handshake: downstreamHandshake,
+                scope: exchange.scope,
             }))
         checkAborted()
 
