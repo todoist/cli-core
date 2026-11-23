@@ -1,3 +1,9 @@
+## [2.0.1](https://github.com/todoist/cli-core/compare/v2.0.0...v2.0.1) (2026-11-23)
+
+### Bug Fixes
+
+* **auth:** pass the granted scope to validateToken ([#187](https://github.com/todoist/cli-core/issues/187)) ([8ae3f77](https://github.com/todoist/cli-core/commit/8ae3f770ca9ef1d38939e19a4a0c6c3d4851a413))
+
 ## [2.0.0](https://github.com/todoist/cli-core/compare/v1.10.2...v2.0.0) (2026-11-11)
 
 ### ⚠ BREAKING CHANGES
