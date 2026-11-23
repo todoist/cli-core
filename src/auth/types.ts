@@ -79,6 +79,11 @@ export type ValidateInput = {
     token: string
     /** Same shape as `ExchangeInput.handshake` — carries the folded `flags` / `readOnly`. */
     handshake: Record<string, unknown>
+    /**
+     * `ExchangeResult.scope`: what the server granted, which can be narrower
+     * than what was requested (the user may grant read-only access, for one).
+     */
+    scope?: string
 }
 
 export type RefreshInput = {
