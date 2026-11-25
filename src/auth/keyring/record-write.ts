@@ -91,12 +91,16 @@ export async function writeRecordWithKeyringFallback<TAccount extends AuthAccoun
  *      token and the bare access token otherwise. `'fallback'` degrades a
  *      `SecureStoreUnavailableError` to `fallbackToken` (and
  *      `fallbackRefreshToken`); `'system'` rejects it. `'plaintext'` writes
- *      the fallback fields directly without calling the keyring.
+ *      the fallback fields directly without calling the keyring. A pair
+ *      too large for one Windows credential keeps the two-item layout: the
+ *      bare access token, then `refreshStore.setSecret`, with the same
+ *      fallback and rollback rules as the access write.
  *   3. `userRecords.upsert(record)`. On failure, best-effort rollback of the
- *      slot write if it succeeded.
- *   4. Only after a successful non-plaintext upsert: wipe the refresh slot
- *      (best-effort). It holds an orphan from a write before the
- *      single-item format, which the new record supersedes.
+ *      slot writes that succeeded.
+ *   4. Only after a successful non-plaintext upsert, and unless step 2 just
+ *      stored the refresh token there: wipe the refresh slot (best-effort).
+ *      It holds an orphan from an earlier write, which the new record
+ *      supersedes.
  *
  * Default promotion is external — preference, not correctness, and an
  * error there must not dirty up a successful credential write.
@@ -116,21 +120,43 @@ export async function writeBundleWithKeyringFallback<TAccount extends AuthAccoun
     const refreshToken = bundle.refreshToken?.trim()
 
     // Both tokens go into the access slot as one item, so a read needs one
-    // keyring access. The refresh slot only ever holds material from before
-    // the single-item format; it is wiped after the upsert below.
+    // keyring access. A pair too large for every backend keeps the two-item
+    // layout instead: access slot plus refresh slot, read with two accesses.
+    const pair = refreshToken ? encodeSlotSecret(accessToken, refreshToken) : undefined
+    const splitRefresh = pair !== undefined && !fitsInOneCredential(pair)
+
     let accessStoredSecurely = false
     if (credentialStore !== 'plaintext') {
         try {
-            await accessStore.setSecret(
-                refreshToken ? encodeSlotSecret(accessToken, refreshToken) : accessToken,
-            )
+            await accessStore.setSecret(pair && !splitRefresh ? pair : accessToken)
             accessStoredSecurely = true
         } catch (error) {
             if (!(error instanceof SecureStoreUnavailableError)) throw error
             if (credentialStore === 'system') throw credentialStoreUnavailableError()
         }
     }
-    const refreshStoredSecurely = refreshToken ? accessStoredSecurely : undefined
+
+    let refreshStoredSecurely = refreshToken ? accessStoredSecurely : undefined
+    if (refreshToken && splitRefresh && accessStoredSecurely) {
+        try {
+            await refreshStore.setSecret(refreshToken)
+        } catch (error) {
+            if (error instanceof SecureStoreUnavailableError && credentialStore === 'fallback') {
+                refreshStoredSecurely = false
+            } else {
+                try {
+                    await accessStore.deleteSecret()
+                } catch {
+                    // best-effort
+                }
+                if (error instanceof SecureStoreUnavailableError) {
+                    throw credentialStoreUnavailableError()
+                }
+                throw error
+            }
+        }
+    }
+    const refreshInOwnSlot = splitRefresh && refreshStoredSecurely === true
 
     const record: UserRecord<TAccount> = {
         account,
@@ -150,25 +176,22 @@ export async function writeBundleWithKeyringFallback<TAccount extends AuthAccoun
     try {
         await userRecords.upsert(record)
     } catch (error) {
-        if (accessStoredSecurely) {
-            try {
-                await accessStore.deleteSecret()
-            } catch {
-                // best-effort
-            }
-        }
+        const rollbacks: Promise<unknown>[] = []
+        if (accessStoredSecurely) rollbacks.push(accessStore.deleteSecret())
+        if (refreshInOwnSlot) rollbacks.push(refreshStore.deleteSecret())
+        await Promise.allSettled(rollbacks)
         throw error
     }
 
-    // Deferred: wipe the refresh slot now that the new record is durable.
-    // It holds either an orphan from a prior refresh-carrying write, or a
-    // refresh token from before the single-item format that the access
-    // slot (or the record's plaintext field) now supersedes. Doing this
-    // before the upsert would lose refresh state if the upsert rejected.
-    // If it fails, readers never reach the slot while the access slot holds
-    // the pair or the `hasRefreshToken` gate is false; the worst case is a
-    // stale keyring entry that `clear()` will pick up.
-    if (credentialStore !== 'plaintext') {
+    // Deferred: wipe the refresh slot now that the new record is durable,
+    // unless this write just stored the refresh token there. Otherwise it
+    // holds either an orphan from a prior refresh-carrying write, or a
+    // refresh token that the access slot (or the record's plaintext field)
+    // now supersedes. Doing this before the upsert would lose refresh state
+    // if the upsert rejected. If it fails, readers never reach the slot while
+    // the access slot holds the pair or the `hasRefreshToken` gate is false;
+    // the worst case is a stale keyring entry that `clear()` will pick up.
+    if (credentialStore !== 'plaintext' && !refreshInOwnSlot) {
         try {
             await refreshStore.deleteSecret()
         } catch {
@@ -177,6 +200,18 @@ export async function writeBundleWithKeyringFallback<TAccount extends AuthAccoun
     }
 
     return { accessStoredSecurely, refreshStoredSecurely }
+}
+
+/**
+ * Windows Credential Manager caps a credential blob at 2,560 bytes, and the
+ * keyring backend stores the secret there as UTF-16, so two code units per
+ * JavaScript string unit. macOS and Secret Service allow far more. One
+ * limit for every platform keeps the stored layout the same everywhere.
+ */
+const CREDENTIAL_BLOB_LIMIT_BYTES = 2560
+
+function fitsInOneCredential(secret: string): boolean {
+    return secret.length * 2 <= CREDENTIAL_BLOB_LIMIT_BYTES
 }
 
 function credentialStoreUnavailableError(): CliError {

@@ -864,6 +864,17 @@ describe('createKeyringTokenStore', () => {
             expect(snapshot?.bundle).toEqual({ accessToken: 'tok_a' })
         })
 
+        it('round-trips a pair too large for one Windows credential through two items', async () => {
+            const { km, store } = mapFixture()
+            const large = { accessToken: 'a'.repeat(700), refreshToken: 'r'.repeat(700) }
+
+            await store.setBundle(account, large)
+
+            expect(km.slots.get('user-42')?.secret).toBe('a'.repeat(700))
+            expect(km.slots.get(refreshAccountSlot('user-42'))?.secret).toBe('r'.repeat(700))
+            await expect(store.activeBundle()).resolves.toMatchObject({ bundle: large })
+        })
+
         it('active() returns only the access token from a one-item record', async () => {
             const { km, store } = mapFixture({
                 '42': { account, hasRefreshToken: true },

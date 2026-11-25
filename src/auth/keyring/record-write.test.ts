@@ -174,6 +174,84 @@ describe('writeBundleWithKeyringFallback', () => {
         expect(state.records.get('42')?.fallbackRefreshToken).toBeUndefined()
     })
 
+    describe('a pair too large for one Windows credential', () => {
+        // 1,280 UTF-16 units fit in Windows' 2,560-byte blob; the JSON pair
+        // around these two tokens does not.
+        const large: TokenBundle = { accessToken: 'a'.repeat(700), refreshToken: 'r'.repeat(700) }
+
+        it('keeps the two-item layout and leaves the refresh slot in place', async () => {
+            const { accessStore, refreshStore, store: userRecords, state } = harness()
+
+            const result = await writeBundleWithKeyringFallback({
+                accessStore,
+                refreshStore,
+                userRecords,
+                account,
+                bundle: large,
+            })
+
+            expect(result).toEqual({ accessStoredSecurely: true, refreshStoredSecurely: true })
+            expect(accessStore.setSpy).toHaveBeenCalledWith('a'.repeat(700))
+            expect(refreshStore.setSpy).toHaveBeenCalledWith('r'.repeat(700))
+            expect(refreshStore.deleteSpy).not.toHaveBeenCalled()
+            expect(state.records.get('42')?.fallbackRefreshToken).toBeUndefined()
+        })
+
+        it('falls back to fallbackRefreshToken when only the refresh slot is offline', async () => {
+            const { accessStore, refreshStore, store: userRecords, state } = harness()
+            refreshStore.setSpy.mockRejectedValueOnce(new SecureStoreUnavailableError('no dbus'))
+
+            const result = await writeBundleWithKeyringFallback({
+                accessStore,
+                refreshStore,
+                userRecords,
+                account,
+                bundle: large,
+            })
+
+            expect(result).toEqual({ accessStoredSecurely: true, refreshStoredSecurely: false })
+            expect(state.records.get('42')?.fallbackRefreshToken).toBe('r'.repeat(700))
+            expect(state.records.get('42')?.fallbackToken).toBeUndefined()
+        })
+
+        it('rolls back the access slot when strict system storage cannot write the refresh token', async () => {
+            const { accessStore, refreshStore, store: userRecords, state } = harness()
+            refreshStore.setSpy.mockRejectedValueOnce(new SecureStoreUnavailableError('no dbus'))
+
+            await expect(
+                writeBundleWithKeyringFallback({
+                    accessStore,
+                    refreshStore,
+                    userRecords,
+                    account,
+                    bundle: large,
+                    credentialStore: 'system',
+                }),
+            ).rejects.toMatchObject({ code: 'AUTH_STORE_WRITE_FAILED' })
+
+            expect(accessStore.deleteSpy).toHaveBeenCalledTimes(1)
+            expect(state.records.size).toBe(0)
+        })
+
+        it('rolls back both slots when upsert fails', async () => {
+            const { accessStore, refreshStore, store: userRecords, upsertSpy } = harness()
+            upsertSpy.mockRejectedValueOnce(new Error('disk full'))
+
+            await expect(
+                writeBundleWithKeyringFallback({
+                    accessStore,
+                    refreshStore,
+                    userRecords,
+                    account,
+                    bundle: large,
+                }),
+            ).rejects.toThrow('disk full')
+
+            expect(accessStore.deleteSpy).toHaveBeenCalledTimes(1)
+            expect(refreshStore.deleteSpy).toHaveBeenCalledTimes(1)
+        })
+    })
+
     it('clears the refresh slot when the bundle has no refresh token (no stale carryover)', async () => {
         const { accessStore, refreshStore, store: userRecords, state } = harness()
 
