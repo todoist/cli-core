@@ -233,6 +233,9 @@ describe('refreshAccessToken', () => {
         const { provider, refreshSpy } = fakeProvider()
         let now = Date.now()
         vi.spyOn(Date, 'now').mockImplementation(() => now)
+        // Age the lock on the mocked clock only, so a slow runner can't push
+        // it past the stale threshold and let the waiter steal it.
+        await utimes(lockPath, new Date(now), new Date(now))
 
         const holder = (async () => {
             await sleep(120)
