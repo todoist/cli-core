@@ -1,3 +1,9 @@
+## [2.0.2](https://github.com/todoist/cli-core/compare/v2.0.1...v2.0.2) (2026-11-25)
+
+### Bug Fixes
+
+* **auth:** wait out a concurrent refresh until its lock goes stale ([#189](https://github.com/todoist/cli-core/issues/189)) ([675865e](https://github.com/todoist/cli-core/commit/675865eb967102e346360c76648535a0630a8320))
+
 ## [2.0.1](https://github.com/todoist/cli-core/compare/v2.0.0...v2.0.1) (2026-11-23)
 
 ### Bug Fixes
