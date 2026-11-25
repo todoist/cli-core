@@ -49,7 +49,56 @@ export async function readAccessTokenForRecord<TAccount extends AuthAccount>(
 ): Promise<ReadAccessTokenOutcome> {
     const fallback = record.fallbackToken?.trim()
     if (fallback) return { ok: true, token: fallback }
-    return readSecretSlot(secureStore, 'keyring slot returned no credential')
+    const outcome = await readSecretSlot(secureStore, ACCESS_SLOT_EMPTY)
+    return outcome.ok ? { ok: true, token: decodeSlotSecret(outcome.token).accessToken } : outcome
+}
+
+const ACCESS_SLOT_EMPTY = 'keyring slot returned no credential'
+const REFRESH_SLOT_EMPTY = 'keyring refresh slot returned no credential'
+
+type SlotSecret = { accessToken: string; refreshToken?: string }
+
+/**
+ * Serialise both tokens for the access slot. One keychain item per account
+ * means one OS access check per read: macOS asks for each item separately,
+ * so the old access + refresh pair cost two prompts whenever the calling
+ * binary was not yet trusted.
+ */
+export function encodeSlotSecret(accessToken: string, refreshToken: string): string {
+    return JSON.stringify({ v: 1, accessToken, refreshToken })
+}
+
+/**
+ * Read either access-slot shape: the JSON pair written by
+ * `encodeSlotSecret`, or a bare access token (access-only records, and
+ * records written before the pair existed). OAuth tokens never start with
+ * `{`, so anything that does not decode to the pair is a bare token.
+ */
+function decodeSlotSecret(secret: string): SlotSecret {
+    if (!secret.startsWith('{')) return { accessToken: secret }
+    try {
+        const parsed: unknown = JSON.parse(secret)
+        if (
+            typeof parsed === 'object' &&
+            parsed !== null &&
+            'v' in parsed &&
+            parsed.v === 1 &&
+            'accessToken' in parsed &&
+            typeof parsed.accessToken === 'string' &&
+            parsed.accessToken.trim() &&
+            'refreshToken' in parsed &&
+            typeof parsed.refreshToken === 'string'
+        ) {
+            const refreshToken = parsed.refreshToken.trim()
+            return {
+                accessToken: parsed.accessToken.trim(),
+                ...(refreshToken ? { refreshToken } : {}),
+            }
+        }
+    } catch {
+        // Not the pair: fall through to the bare-token reading.
+    }
+    return { accessToken: secret }
 }
 
 /**
@@ -88,5 +137,39 @@ export async function readRefreshTokenForRecord<TAccount extends AuthAccount>(
     const fallback = record.fallbackRefreshToken?.trim()
     if (fallback) return { ok: true, token: fallback }
 
-    return readSecretSlot(refreshStore, 'keyring refresh slot returned no credential')
+    return readSecretSlot(refreshStore, REFRESH_SLOT_EMPTY)
+}
+
+/**
+ * Both tokens for `activeBundle` with at most one keyring read in the normal
+ * case. The access slot holds the pair since the single-item format; a bare
+ * access token there means a record from before it, whose refresh token
+ * still lives in the separate refresh slot until the next `setBundle`
+ * rewrites it.
+ */
+export async function readBundleForRecord<TAccount extends AuthAccount>(
+    record: UserRecord<TAccount>,
+    accessStore: SecureStore,
+    refreshStore: SecureStore,
+): Promise<{ access: ReadAccessTokenOutcome; refresh: ReadRefreshTokenOutcome }> {
+    const fallbackAccess = record.fallbackToken?.trim()
+    if (fallbackAccess) {
+        return {
+            access: { ok: true, token: fallbackAccess },
+            refresh: await readRefreshTokenForRecord(record, refreshStore),
+        }
+    }
+
+    const slot = await readSecretSlot(accessStore, ACCESS_SLOT_EMPTY)
+    if (!slot.ok) return { access: slot, refresh: { ok: false, reason: 'not-present' } }
+
+    const secret = decodeSlotSecret(slot.token)
+    const access: ReadAccessTokenOutcome = { ok: true, token: secret.accessToken }
+    if (record.hasRefreshToken === false) {
+        return { access, refresh: { ok: false, reason: 'not-present' } }
+    }
+    const fallbackRefresh = record.fallbackRefreshToken?.trim()
+    if (fallbackRefresh) return { access, refresh: { ok: true, token: fallbackRefresh } }
+    if (secret.refreshToken) return { access, refresh: { ok: true, token: secret.refreshToken } }
+    return { access, refresh: await readSecretSlot(refreshStore, REFRESH_SLOT_EMPTY) }
 }

@@ -12,7 +12,7 @@ import {
     hasPlaintextCredential,
     type ReadAccessTokenOutcome,
     readAccessTokenForRecord,
-    readRefreshTokenForRecord,
+    readBundleForRecord,
 } from './internal.js'
 import { writeBundleWithKeyringFallback, writeRecordWithKeyringFallback } from './record-write.js'
 import {
@@ -334,17 +334,18 @@ export function createKeyringTokenStore<TAccount extends AuthAccount>(
             const record = await resolveRecord(ref)
             if (!record) return null
 
-            // Read both slots in parallel. The refresh side honours the
-            // `hasRefreshToken: false` gate inside `readRefreshTokenForRecord`,
-            // so an access-only record short-circuits without a refresh-slot
-            // IPC. Access-slot failures map to the same typed error as
-            // `active()`; a refresh-slot failure degrades silently — the
-            // bundle returns without `refreshToken` and the silent-refresh
-            // helper translates that to `AUTH_REFRESH_UNAVAILABLE`.
-            const [accessOutcome, refreshOutcome] = await Promise.all([
-                readAccessTokenForRecord(record, secureStoreFor(record.account)),
-                readRefreshTokenForRecord(record, refreshSecureStoreFor(record.account)),
-            ])
+            // One keyring read for records in the single-item format. Only a
+            // record from before it reaches the refresh slot, and only when
+            // the `hasRefreshToken` gate allows. Access-slot failures map to
+            // the same typed error as `active()`; a refresh-slot failure
+            // degrades silently — the bundle returns without `refreshToken`
+            // and the silent-refresh helper translates that to
+            // `AUTH_REFRESH_UNAVAILABLE`.
+            const { access: accessOutcome, refresh: refreshOutcome } = await readBundleForRecord(
+                record,
+                secureStoreFor(record.account),
+                refreshSecureStoreFor(record.account),
+            )
             if (!accessOutcome.ok) throw accessReadError(accessOutcome)
             if (refreshOutcome.ok === false && refreshOutcome.reason === 'slot-error') {
                 throw new CliError(
