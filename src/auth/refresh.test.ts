@@ -219,7 +219,44 @@ describe('refreshAccessToken', () => {
         expect(refreshSpy).not.toHaveBeenCalled()
     })
 
-    it('lock contention: throws AUTH_REFRESH_TRANSIENT when the holder times out without rotating', async () => {
+    it('lock contention: waits for a holder that is still refreshing just before its lock would count as abandoned', async () => {
+        // A holder's POST alone may take the providers' full 10s timeout, and
+        // the store reads and writes around it add more. Until the lock is
+        // old enough to steal, the waiter can't tell such a holder from a
+        // quick one, so it must still be waiting when this one rotates.
+        await writeFile(lockPath, '', { flag: 'wx' })
+
+        const { store, state } = fakeStore({
+            account,
+            bundle: bundle({ accessTokenExpiresAt: Date.now() - 1_000 }),
+        })
+        const { provider, refreshSpy } = fakeProvider()
+        let now = Date.now()
+        vi.spyOn(Date, 'now').mockImplementation(() => now)
+
+        const holder = (async () => {
+            await sleep(120)
+            now += 14_000
+            await sleep(120)
+            state.entries[0].bundle = { accessToken: 'tok_held', refreshToken: 'r_held' }
+            await rm(lockPath, { force: true })
+        })()
+
+        // Settled rather than `Promise.all`, so a waiter that gives up early
+        // can't leave the holder running into the next test.
+        const [outcome] = await Promise.allSettled([
+            refreshAccessToken({ store, provider, lockPath }),
+            holder,
+        ])
+
+        expect(outcome).toMatchObject({
+            status: 'fulfilled',
+            value: { rotated: true, bundle: { accessToken: 'tok_held' } },
+        })
+        expect(refreshSpy).not.toHaveBeenCalled()
+    })
+
+    it('lock contention: throws AUTH_REFRESH_TRANSIENT when the wait runs out on a fresh lock without a rotation', async () => {
         await writeFile(lockPath, '', { flag: 'wx' })
 
         const { store } = fakeStore({
@@ -227,12 +264,23 @@ describe('refreshAccessToken', () => {
             bundle: bundle({ accessTokenExpiresAt: Date.now() + 1_000 }),
         })
         const { provider, refreshSpy } = fakeProvider()
+        let now = Date.now()
+        vi.spyOn(Date, 'now').mockImplementation(() => now)
 
-        await expect(
+        const outcome = expect(
             refreshAccessToken({ store, provider, skewMs: 5_000, lockPath }),
         ).rejects.toMatchObject({ code: 'AUTH_REFRESH_TRANSIENT' })
+
+        // Another invocation took the lock over just as the wait ran out, so
+        // it is fresh, not stale, and must not be stolen.
+        await sleep(120)
+        const later = now + 20_000
+        await utimes(lockPath, new Date(later), new Date(later))
+        now = later
+
+        await outcome
         expect(refreshSpy).not.toHaveBeenCalled()
-    }, 5_000)
+    })
 
     it('carries the previous refresh token forward when the server omits it from the response', async () => {
         const { store, state } = fakeStore({

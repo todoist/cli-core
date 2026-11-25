@@ -56,12 +56,16 @@ export type RefreshAccessTokenResult<TAccount extends AuthAccount> = {
 }
 
 export const DEFAULT_SKEW_MS = 60_000
-const LOCK_WAIT_TIMEOUT_MS = 2_000
 const LOCK_POLL_INTERVAL_MS = 50
 // A lock older than this was almost certainly left by a crashed holder — the
 // refresh POST is bounded by a provider-side timeout well under this — so it's
 // safe to steal rather than block every future refresh forever.
 const LOCK_STALE_MS = 15_000
+// Until a lock is old enough to steal, its holder may still be refreshing, and
+// giving up earlier fails a command the holder is about to make good. So a
+// waiter outlasts the stale threshold: it ends with the lock released, or
+// stolen once stale. The extra second covers the last poll.
+const LOCK_WAIT_TIMEOUT_MS = LOCK_STALE_MS + 1_000
 
 /**
  * Rotate the access token using the stored refresh token. Proactive when
