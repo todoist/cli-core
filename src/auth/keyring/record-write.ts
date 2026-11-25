@@ -150,7 +150,13 @@ export async function writeBundleWithKeyringFallback<TAccount extends AuthAccoun
     try {
         await userRecords.upsert(record)
     } catch (error) {
-        if (accessStoredSecurely) await Promise.allSettled([accessStore.deleteSecret()])
+        if (accessStoredSecurely) {
+            try {
+                await accessStore.deleteSecret()
+            } catch {
+                // best-effort
+            }
+        }
         throw error
     }
 

@@ -174,28 +174,6 @@ describe('writeBundleWithKeyringFallback', () => {
         expect(state.records.get('42')?.fallbackRefreshToken).toBeUndefined()
     })
 
-    it('wipes the refresh slot left from the two-item format after writing the pair', async () => {
-        const { accessStore, refreshStore, store: userRecords, upsertSpy } = harness()
-        const callOrder: string[] = []
-        refreshStore.deleteSpy.mockImplementationOnce(async () => {
-            callOrder.push('refresh-delete')
-            return true
-        })
-        upsertSpy.mockImplementationOnce(async () => {
-            callOrder.push('upsert')
-        })
-
-        await writeBundleWithKeyringFallback({
-            accessStore,
-            refreshStore,
-            userRecords,
-            account,
-            bundle,
-        })
-
-        expect(callOrder).toEqual(['upsert', 'refresh-delete'])
-    })
-
     it('clears the refresh slot when the bundle has no refresh token (no stale carryover)', async () => {
         const { accessStore, refreshStore, store: userRecords, state } = harness()
 
@@ -269,9 +247,10 @@ describe('writeBundleWithKeyringFallback', () => {
         expect(state.records.get('42')?.hasRefreshToken).toBe(true)
     })
 
-    it('defers the no-refresh slot wipe until after upsert succeeds', async () => {
+    it('defers the refresh slot wipe until after upsert succeeds', async () => {
         // Regression: wiping before upsert would lose refresh state if the
         // upsert then rejected. Order must be set-access → upsert → wipe.
+        // The wipe also removes a refresh slot left from the two-item format.
         const { accessStore, refreshStore, store: userRecords, upsertSpy } = harness()
         const callOrder: string[] = []
         refreshStore.deleteSpy.mockImplementationOnce(async () => {
@@ -287,7 +266,7 @@ describe('writeBundleWithKeyringFallback', () => {
             refreshStore,
             userRecords,
             account,
-            bundle: { accessToken: 'tok_a' },
+            bundle,
         })
 
         expect(callOrder).toEqual(['upsert', 'refresh-delete'])

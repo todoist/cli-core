@@ -49,14 +49,18 @@ export async function readAccessTokenForRecord<TAccount extends AuthAccount>(
 ): Promise<ReadAccessTokenOutcome> {
     const fallback = record.fallbackToken?.trim()
     if (fallback) return { ok: true, token: fallback }
-    const outcome = await readSecretSlot(secureStore, ACCESS_SLOT_EMPTY)
-    return outcome.ok ? { ok: true, token: decodeSlotSecret(outcome.token).accessToken } : outcome
+    const slot = await readAccessSlot(secureStore)
+    return slot.ok ? { ok: true, token: slot.secret.accessToken } : slot
 }
 
 const ACCESS_SLOT_EMPTY = 'keyring slot returned no credential'
 const REFRESH_SLOT_EMPTY = 'keyring refresh slot returned no credential'
 
 type SlotSecret = { accessToken: string; refreshToken?: string }
+
+type ReadAccessSlotOutcome =
+    | { ok: true; secret: SlotSecret }
+    | Extract<ReadAccessTokenOutcome, { ok: false }>
 
 /**
  * Serialise both tokens for the access slot. One keychain item per account
@@ -69,36 +73,55 @@ export function encodeSlotSecret(accessToken: string, refreshToken: string): str
 }
 
 /**
+ * Read and decode the access slot. Shared by `active()` and `activeBundle()`
+ * so both resolve the same token from the same stored value.
+ */
+async function readAccessSlot(store: SecureStore): Promise<ReadAccessSlotOutcome> {
+    const slot = await readSecretSlot(store, ACCESS_SLOT_EMPTY)
+    if (!slot.ok) return slot
+    const secret = decodeSlotSecret(slot.token)
+    if (secret) return { ok: true, secret }
+    return {
+        ok: false,
+        reason: 'slot-error',
+        detail: 'keyring slot holds a credential format this version does not read',
+    }
+}
+
+/**
  * Read either access-slot shape: the JSON pair written by
  * `encodeSlotSecret`, or a bare access token (access-only records, and
- * records written before the pair existed). OAuth tokens never start with
- * `{`, so anything that does not decode to the pair is a bare token.
+ * records written before the pair existed). OAuth tokens are never JSON.
+ * A JSON object that carries token fields but is not the v1 pair is a
+ * format this version does not know: `null`, so it is never sent to an API
+ * as a bearer token with a refresh token inside it.
  */
-function decodeSlotSecret(secret: string): SlotSecret {
+function decodeSlotSecret(secret: string): SlotSecret | null {
     if (!secret.startsWith('{')) return { accessToken: secret }
+    let parsed: unknown
     try {
-        const parsed: unknown = JSON.parse(secret)
-        if (
-            typeof parsed === 'object' &&
-            parsed !== null &&
-            'v' in parsed &&
-            parsed.v === 1 &&
-            'accessToken' in parsed &&
-            typeof parsed.accessToken === 'string' &&
-            parsed.accessToken.trim() &&
-            'refreshToken' in parsed &&
-            typeof parsed.refreshToken === 'string'
-        ) {
-            const refreshToken = parsed.refreshToken.trim()
-            return {
-                accessToken: parsed.accessToken.trim(),
-                ...(refreshToken ? { refreshToken } : {}),
-            }
-        }
+        parsed = JSON.parse(secret)
     } catch {
-        // Not the pair: fall through to the bare-token reading.
+        return { accessToken: secret }
     }
-    return { accessToken: secret }
+    if (typeof parsed !== 'object' || parsed === null) return { accessToken: secret }
+    if (!('accessToken' in parsed) && !('refreshToken' in parsed)) return { accessToken: secret }
+    if (
+        'v' in parsed &&
+        parsed.v === 1 &&
+        'accessToken' in parsed &&
+        typeof parsed.accessToken === 'string' &&
+        parsed.accessToken.trim() &&
+        'refreshToken' in parsed &&
+        typeof parsed.refreshToken === 'string'
+    ) {
+        const refreshToken = parsed.refreshToken.trim()
+        return {
+            accessToken: parsed.accessToken.trim(),
+            ...(refreshToken ? { refreshToken } : {}),
+        }
+    }
+    return null
 }
 
 /**
@@ -163,25 +186,25 @@ export async function readBundleForRecord<TAccount extends AuthAccount>(
         }
     }
 
-    const slot = await readSecretSlot(accessStore, ACCESS_SLOT_EMPTY)
+    const slot = await readAccessSlot(accessStore)
     if (!slot.ok) return { access: slot, refresh: { ok: false, reason: 'not-present' } }
 
-    const secret = decodeSlotSecret(slot.token)
+    const { secret } = slot
     const refresh = await readRefreshTokenForRecord(record, refreshStore, secret.refreshToken)
-    if (refresh.ok || refresh.reason !== 'slot-empty' || secret.refreshToken) {
+    if (refresh.ok || refresh.reason !== 'slot-empty') {
         return { access: { ok: true, token: secret.accessToken }, refresh }
     }
 
     // A bare access token and an empty refresh slot: another process may
-    // have moved this record to the single-item format between our two
-    // reads, deleting the refresh slot. Read the access slot once more.
-    const retry = await readSecretSlot(accessStore, ACCESS_SLOT_EMPTY)
-    const moved = retry.ok ? decodeSlotSecret(retry.token) : undefined
-    if (moved?.refreshToken) {
-        return {
-            access: { ok: true, token: moved.accessToken },
-            refresh: { ok: true, token: moved.refreshToken },
-        }
+    // have rewritten this record between our two reads, moving it to the
+    // single-item format and deleting the refresh slot. Read the access
+    // slot once more and prefer what it holds now.
+    const retry = await readAccessSlot(accessStore)
+    if (!retry.ok) return { access: { ok: true, token: secret.accessToken }, refresh }
+    return {
+        access: { ok: true, token: retry.secret.accessToken },
+        refresh: retry.secret.refreshToken
+            ? { ok: true, token: retry.secret.refreshToken }
+            : refresh,
     }
-    return { access: { ok: true, token: secret.accessToken }, refresh }
 }

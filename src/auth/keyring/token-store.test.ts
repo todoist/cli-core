@@ -829,9 +829,39 @@ describe('createKeyringTokenStore', () => {
 
             await store.setBundle(account, bundle)
 
+            expect(km.slots.get('user-42')?.secret).toBe(PAIR)
             await expect(store.activeBundle()).resolves.toMatchObject({
                 bundle: { accessToken: 'tok_a', refreshToken: 'tok_r' },
             })
+        })
+
+        it.each([
+            ['without the version marker', '{"accessToken":"tok_a","refreshToken":"tok_r"}'],
+            ['with an unknown version', '{"v":2,"accessToken":"tok_a","refreshToken":"tok_r"}'],
+        ])(
+            'active() and activeBundle() refuse a token pair %s instead of sending it as a token',
+            async (_name, secret) => {
+                const { km, store } = mapFixture({
+                    '42': { account, hasRefreshToken: true },
+                })
+                km.slots.set('user-42', { secret })
+
+                await expect(store.active()).rejects.toMatchObject({
+                    code: 'AUTH_STORE_READ_FAILED',
+                })
+                await expect(store.activeBundle()).rejects.toMatchObject({
+                    code: 'AUTH_STORE_READ_FAILED',
+                })
+            },
+        )
+
+        it('activeBundle returns the access token alone when a legacy record has no refresh slot', async () => {
+            const { km, store } = mapFixture({ '42': { account } })
+            km.slots.set('user-42', { secret: 'tok_a' })
+
+            const snapshot = await store.activeBundle()
+
+            expect(snapshot?.bundle).toEqual({ accessToken: 'tok_a' })
         })
 
         it('active() returns only the access token from a one-item record', async () => {
@@ -845,7 +875,7 @@ describe('createKeyringTokenStore', () => {
 
         it.each([
             ['a token that starts with a brace', '{not-json'],
-            ['JSON without the version marker', '{"accessToken":"tok_a","refreshToken":"tok_r"}'],
+            ['JSON without token fields', '{"id":"tok_a"}'],
         ])('active() treats %s as a bare access token', async (_name, secret) => {
             const { km, store } = mapFixture({
                 '42': { account, hasRefreshToken: false },
