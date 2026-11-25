@@ -167,8 +167,21 @@ export async function readBundleForRecord<TAccount extends AuthAccount>(
     if (!slot.ok) return { access: slot, refresh: { ok: false, reason: 'not-present' } }
 
     const secret = decodeSlotSecret(slot.token)
-    return {
-        access: { ok: true, token: secret.accessToken },
-        refresh: await readRefreshTokenForRecord(record, refreshStore, secret.refreshToken),
+    const refresh = await readRefreshTokenForRecord(record, refreshStore, secret.refreshToken)
+    if (refresh.ok || refresh.reason !== 'slot-empty' || secret.refreshToken) {
+        return { access: { ok: true, token: secret.accessToken }, refresh }
     }
+
+    // A bare access token and an empty refresh slot: another process may
+    // have moved this record to the single-item format between our two
+    // reads, deleting the refresh slot. Read the access slot once more.
+    const retry = await readSecretSlot(accessStore, ACCESS_SLOT_EMPTY)
+    const moved = retry.ok ? decodeSlotSecret(retry.token) : undefined
+    if (moved?.refreshToken) {
+        return {
+            access: { ok: true, token: moved.accessToken },
+            refresh: { ok: true, token: moved.refreshToken },
+        }
+    }
+    return { access: { ok: true, token: secret.accessToken }, refresh }
 }

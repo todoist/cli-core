@@ -789,6 +789,51 @@ describe('createKeyringTokenStore', () => {
             expect(km.getCalls.get(refreshAccountSlot('user-42'))).toBeUndefined()
         })
 
+        it('activeBundle picks up the pair when another process moves the record between reads', async () => {
+            const { km, store } = mapFixture({
+                '42': { account, hasRefreshToken: true },
+            })
+            km.slots.set('user-42', { secret: 'tok_old_a' })
+            km.slots.set(refreshAccountSlot('user-42'), { secret: 'tok_old_r' })
+            // The first access read sees the bare token; the concurrent
+            // migration then lands before the refresh-slot read.
+            const create = km.create
+            mockedCreateSecureStore.mockImplementation((args) => {
+                const slot = create(args)
+                if (args.account !== 'user-42') return slot
+                return {
+                    ...slot,
+                    async getSecret() {
+                        const secret = await slot.getSecret()
+                        km.slots.set('user-42', { secret: PAIR })
+                        km.slots.set(refreshAccountSlot('user-42'), { secret: null })
+                        return secret
+                    },
+                }
+            })
+
+            const snapshot = await store.activeBundle()
+
+            expect(snapshot?.bundle).toEqual({ accessToken: 'tok_a', refreshToken: 'tok_r' })
+        })
+
+        it('setBundle succeeds and reads back the pair when the old refresh slot cannot be deleted', async () => {
+            const { km, store } = mapFixture({
+                '42': { account, hasRefreshToken: true },
+            })
+            km.slots.set('user-42', { secret: 'tok_old_a' })
+            km.slots.set(refreshAccountSlot('user-42'), {
+                secret: 'tok_old_r',
+                delErr: new Error('item locked'),
+            })
+
+            await store.setBundle(account, bundle)
+
+            await expect(store.activeBundle()).resolves.toMatchObject({
+                bundle: { accessToken: 'tok_a', refreshToken: 'tok_r' },
+            })
+        })
+
         it('active() returns only the access token from a one-item record', async () => {
             const { km, store } = mapFixture({
                 '42': { account, hasRefreshToken: true },
