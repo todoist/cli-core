@@ -233,6 +233,24 @@ describe('writeBundleWithKeyringFallback', () => {
             expect(state.records.size).toBe(0)
         })
 
+        it('rolls back the access slot and rethrows a non-keyring refresh-slot error', async () => {
+            const { accessStore, refreshStore, store: userRecords, state } = harness()
+            refreshStore.setSpy.mockRejectedValueOnce(new Error('refresh slot blew up'))
+
+            await expect(
+                writeBundleWithKeyringFallback({
+                    accessStore,
+                    refreshStore,
+                    userRecords,
+                    account,
+                    bundle: large,
+                }),
+            ).rejects.toThrow('refresh slot blew up')
+
+            expect(accessStore.deleteSpy).toHaveBeenCalledTimes(1)
+            expect(state.records.size).toBe(0)
+        })
+
         it('rolls back both slots when upsert fails', async () => {
             const { accessStore, refreshStore, store: userRecords, upsertSpy } = harness()
             upsertSpy.mockRejectedValueOnce(new Error('disk full'))
