@@ -123,19 +123,22 @@ async function readSecretSlot(
 }
 
 /**
- * Refresh-side analogue of `readAccessTokenForRecord`. Honours the
- * `hasRefreshToken: false` gate — a record that knows it has no refresh
- * material short-circuits to `not-present` without touching the keyring.
- * Legacy records (`hasRefreshToken === undefined`) probe the slot once.
+ * Refresh-side analogue of `readAccessTokenForRecord`. Precedence: the
+ * `hasRefreshToken: false` gate, then the record's plaintext field, then a
+ * refresh token already decoded from the access slot, then the separate
+ * refresh slot of the two-item format. Legacy records
+ * (`hasRefreshToken === undefined`) probe the slot once.
  */
 export async function readRefreshTokenForRecord<TAccount extends AuthAccount>(
     record: UserRecord<TAccount>,
     refreshStore: SecureStore,
+    embeddedToken?: string,
 ): Promise<ReadRefreshTokenOutcome> {
     if (record.hasRefreshToken === false) return { ok: false, reason: 'not-present' }
 
     const fallback = record.fallbackRefreshToken?.trim()
     if (fallback) return { ok: true, token: fallback }
+    if (embeddedToken) return { ok: true, token: embeddedToken }
 
     return readSecretSlot(refreshStore, REFRESH_SLOT_EMPTY)
 }
@@ -164,12 +167,8 @@ export async function readBundleForRecord<TAccount extends AuthAccount>(
     if (!slot.ok) return { access: slot, refresh: { ok: false, reason: 'not-present' } }
 
     const secret = decodeSlotSecret(slot.token)
-    const access: ReadAccessTokenOutcome = { ok: true, token: secret.accessToken }
-    if (record.hasRefreshToken === false) {
-        return { access, refresh: { ok: false, reason: 'not-present' } }
+    return {
+        access: { ok: true, token: secret.accessToken },
+        refresh: await readRefreshTokenForRecord(record, refreshStore, secret.refreshToken),
     }
-    const fallbackRefresh = record.fallbackRefreshToken?.trim()
-    if (fallbackRefresh) return { access, refresh: { ok: true, token: fallbackRefresh } }
-    if (secret.refreshToken) return { access, refresh: { ok: true, token: secret.refreshToken } }
-    return { access, refresh: await readSecretSlot(refreshStore, REFRESH_SLOT_EMPTY) }
 }

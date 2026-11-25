@@ -771,6 +771,24 @@ describe('createKeyringTokenStore', () => {
             expect(km.slots.get(refreshAccountSlot('user-42'))?.secret).toBeNull()
         })
 
+        it('activeBundle returns the plaintext pair written when the keyring went offline, without reading it', async () => {
+            const { km, store } = mapFixture({
+                '42': { account, hasRefreshToken: true },
+            })
+            km.slots.set('user-42', { secret: PAIR })
+            km.slots.get('user-42')!.setErr = new SecureStoreUnavailableError('locked')
+
+            await store.setBundle(account, { accessToken: 'tok_new_a', refreshToken: 'tok_new_r' })
+            const snapshot = await store.activeBundle()
+
+            expect(snapshot?.bundle).toEqual({
+                accessToken: 'tok_new_a',
+                refreshToken: 'tok_new_r',
+            })
+            expect(km.getCalls.get('user-42')).toBeUndefined()
+            expect(km.getCalls.get(refreshAccountSlot('user-42'))).toBeUndefined()
+        })
+
         it('active() returns only the access token from a one-item record', async () => {
             const { km, store } = mapFixture({
                 '42': { account, hasRefreshToken: true },

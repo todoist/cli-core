@@ -119,19 +119,18 @@ export async function writeBundleWithKeyringFallback<TAccount extends AuthAccoun
     // keyring access. The refresh slot only ever holds material from before
     // the single-item format; it is wiped after the upsert below.
     let accessStoredSecurely = false
-    let refreshStoredSecurely: boolean | undefined = refreshToken ? false : undefined
     if (credentialStore !== 'plaintext') {
         try {
             await accessStore.setSecret(
                 refreshToken ? encodeSlotSecret(accessToken, refreshToken) : accessToken,
             )
             accessStoredSecurely = true
-            if (refreshToken) refreshStoredSecurely = true
         } catch (error) {
             if (!(error instanceof SecureStoreUnavailableError)) throw error
             if (credentialStore === 'system') throw credentialStoreUnavailableError()
         }
     }
+    const refreshStoredSecurely = refreshToken ? accessStoredSecurely : undefined
 
     const record: UserRecord<TAccount> = {
         account,
