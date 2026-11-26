@@ -31,6 +31,7 @@ type Account = {
 const SERVICE = 'cli-core-test'
 const LOCATION = '/tmp/fake/config.json'
 const account: Account = { id: '42', label: 'me', email: 'a@b.c' }
+const PAIR = '{"v":1,"accessToken":"tok_a","refreshToken":"tok_r"}'
 
 type SingleSlot = ReturnType<typeof buildSingleSlot>
 
@@ -589,14 +590,14 @@ describe('createKeyringTokenStore', () => {
             accessTokenExpiresAt: 1_700_000_000_000,
         }
 
-        it('persists access slot, refresh slot, and record metadata; active() returns the access snapshot', async () => {
+        it('persists both tokens in one keyring item plus record metadata; active() returns the access snapshot', async () => {
             const { km, store, state } = mapFixture()
 
             await store.setBundle(account, bundle, { promoteDefault: true })
 
-            // Storage: both slots written, record carries gate + expiry.
-            expect(km.slots.get('user-42')?.secret).toBe('tok_a')
-            expect(km.slots.get(refreshAccountSlot('user-42'))?.secret).toBe('tok_r')
+            // Storage: one item holds both tokens, record carries gate + expiry.
+            expect(km.slots.get('user-42')?.secret).toBe(PAIR)
+            expect(km.slots.get(refreshAccountSlot('user-42'))?.secret ?? null).toBeNull()
             const record = state.records.get('42')
             expect(record?.hasRefreshToken).toBe(true)
             expect(record?.accessTokenExpiresAt).toBe(1_700_000_000_000)
@@ -651,8 +652,7 @@ describe('createKeyringTokenStore', () => {
 
             await store.setBundle(account, bundle, { preserveStorage: true })
 
-            expect(km.slots.get('user-42')?.secret).toBe('tok_a')
-            expect(km.slots.get(refreshAccountSlot('user-42'))?.secret).toBe('tok_r')
+            expect(km.slots.get('user-42')?.secret).toBe(PAIR)
             expect(state.records.get('42')?.fallbackToken).toBeUndefined()
             expect(state.records.get('42')?.fallbackRefreshToken).toBeUndefined()
         })
@@ -678,7 +678,7 @@ describe('createKeyringTokenStore', () => {
 
             await store.setBundle(account, bundle, { preserveStorage: true })
 
-            expect(km.slots.get('user-42')?.secret).toBe('tok_a')
+            expect(km.slots.get('user-42')?.secret).toBe(PAIR)
             expect(state.records.get('42')?.fallbackToken).toBeUndefined()
         })
 
@@ -706,19 +706,20 @@ describe('createKeyringTokenStore', () => {
 
             await store.setBundle(account, bundle)
 
-            expect(km.slots.get('user-42')?.secret).toBe('tok_a')
+            expect(km.slots.get('user-42')?.secret).toBe(PAIR)
             expect(state.records.get('42')?.fallbackToken).toBeUndefined()
         })
 
-        it('set() wipes the refresh slot left behind by a prior setBundle', async () => {
+        it('set() wipes the refresh slot left behind by a prior two-item write', async () => {
             // Regression: `set(account, token)` is documented as "replacing
             // any previous entry". A later set() must leave no orphan
             // refresh material — otherwise a future bundle-aware reader
             // would see stale data.
-            const { km, store, state } = mapFixture()
-
-            await store.setBundle(account, bundle, { promoteDefault: true })
-            expect(km.slots.get(refreshAccountSlot('user-42'))?.secret).toBe('tok_r')
+            const { km, store, state } = mapFixture({
+                '42': { account, hasRefreshToken: true },
+            })
+            km.slots.set('user-42', { secret: 'tok_a' })
+            km.slots.set(refreshAccountSlot('user-42'), { secret: 'tok_r' })
 
             await store.set(account, 'tok_a_replacement')
 
@@ -740,8 +741,159 @@ describe('createKeyringTokenStore', () => {
                     accessTokenExpiresAt: 1_700_000_000_000,
                 },
             })
-            // Sanity: both slots read, refresh slot was actually populated.
-            expect(km.slots.get(refreshAccountSlot('user-42'))?.secret).toBe('tok_r')
+            // One keychain item read: macOS asks for each item separately.
+            expect(km.getCalls.get('user-42')).toBe(1)
+            expect(km.getCalls.get(refreshAccountSlot('user-42'))).toBeUndefined()
+        })
+
+        it('activeBundle still reads a record stored in the two-item format', async () => {
+            const { km, store } = mapFixture({
+                '42': { account, hasRefreshToken: true },
+            })
+            km.slots.set('user-42', { secret: 'tok_a' })
+            km.slots.set(refreshAccountSlot('user-42'), { secret: 'tok_r' })
+
+            const snapshot = await store.activeBundle()
+
+            expect(snapshot?.bundle).toEqual({ accessToken: 'tok_a', refreshToken: 'tok_r' })
+        })
+
+        it('setBundle moves a two-item record into one item and removes the refresh slot', async () => {
+            const { km, store } = mapFixture({
+                '42': { account, hasRefreshToken: true },
+            })
+            km.slots.set('user-42', { secret: 'tok_old_a' })
+            km.slots.set(refreshAccountSlot('user-42'), { secret: 'tok_old_r' })
+
+            await store.setBundle(account, bundle, { preserveStorage: true })
+
+            expect(km.slots.get('user-42')?.secret).toBe(PAIR)
+            expect(km.slots.get(refreshAccountSlot('user-42'))?.secret).toBeNull()
+        })
+
+        it('activeBundle returns the plaintext pair written when the keyring went offline, without reading it', async () => {
+            const { km, store } = mapFixture({
+                '42': { account, hasRefreshToken: true },
+            })
+            km.slots.set('user-42', { secret: PAIR })
+            km.slots.get('user-42')!.setErr = new SecureStoreUnavailableError('locked')
+
+            await store.setBundle(account, { accessToken: 'tok_new_a', refreshToken: 'tok_new_r' })
+            const snapshot = await store.activeBundle()
+
+            expect(snapshot?.bundle).toEqual({
+                accessToken: 'tok_new_a',
+                refreshToken: 'tok_new_r',
+            })
+            expect(km.getCalls.get('user-42')).toBeUndefined()
+            expect(km.getCalls.get(refreshAccountSlot('user-42'))).toBeUndefined()
+        })
+
+        it('activeBundle picks up the pair when another process moves the record between reads', async () => {
+            const { km, store } = mapFixture({
+                '42': { account, hasRefreshToken: true },
+            })
+            km.slots.set('user-42', { secret: 'tok_old_a' })
+            km.slots.set(refreshAccountSlot('user-42'), { secret: 'tok_old_r' })
+            // The first access read sees the bare token; the concurrent
+            // migration then lands before the refresh-slot read.
+            const create = km.create
+            mockedCreateSecureStore.mockImplementation((args) => {
+                const slot = create(args)
+                if (args.account !== 'user-42') return slot
+                return {
+                    ...slot,
+                    async getSecret() {
+                        const secret = await slot.getSecret()
+                        km.slots.set('user-42', { secret: PAIR })
+                        km.slots.set(refreshAccountSlot('user-42'), { secret: null })
+                        return secret
+                    },
+                }
+            })
+
+            const snapshot = await store.activeBundle()
+
+            expect(snapshot?.bundle).toEqual({ accessToken: 'tok_a', refreshToken: 'tok_r' })
+        })
+
+        it('setBundle succeeds and reads back the pair when the old refresh slot cannot be deleted', async () => {
+            const { km, store } = mapFixture({
+                '42': { account, hasRefreshToken: true },
+            })
+            km.slots.set('user-42', { secret: 'tok_old_a' })
+            km.slots.set(refreshAccountSlot('user-42'), {
+                secret: 'tok_old_r',
+                delErr: new Error('item locked'),
+            })
+
+            await store.setBundle(account, bundle)
+
+            expect(km.slots.get('user-42')?.secret).toBe(PAIR)
+            await expect(store.activeBundle()).resolves.toMatchObject({
+                bundle: { accessToken: 'tok_a', refreshToken: 'tok_r' },
+            })
+        })
+
+        it.each([
+            ['without the version marker', '{"accessToken":"tok_a","refreshToken":"tok_r"}'],
+            ['with an unknown version', '{"v":2,"accessToken":"tok_a","refreshToken":"tok_r"}'],
+        ])(
+            'active() and activeBundle() refuse a token pair %s instead of sending it as a token',
+            async (_name, secret) => {
+                const { km, store } = mapFixture({
+                    '42': { account, hasRefreshToken: true },
+                })
+                km.slots.set('user-42', { secret })
+
+                await expect(store.active()).rejects.toMatchObject({
+                    code: 'AUTH_STORE_READ_FAILED',
+                })
+                await expect(store.activeBundle()).rejects.toMatchObject({
+                    code: 'AUTH_STORE_READ_FAILED',
+                })
+            },
+        )
+
+        it('activeBundle returns the access token alone when a legacy record has no refresh slot', async () => {
+            const { km, store } = mapFixture({ '42': { account } })
+            km.slots.set('user-42', { secret: 'tok_a' })
+
+            const snapshot = await store.activeBundle()
+
+            expect(snapshot?.bundle).toEqual({ accessToken: 'tok_a' })
+        })
+
+        it('round-trips a pair too large for one Windows credential through two items', async () => {
+            const { km, store } = mapFixture()
+            const large = { accessToken: 'a'.repeat(700), refreshToken: 'r'.repeat(700) }
+
+            await store.setBundle(account, large)
+
+            expect(km.slots.get('user-42')?.secret).toBe('a'.repeat(700))
+            expect(km.slots.get(refreshAccountSlot('user-42'))?.secret).toBe('r'.repeat(700))
+            await expect(store.activeBundle()).resolves.toMatchObject({ bundle: large })
+        })
+
+        it('active() returns only the access token from a one-item record', async () => {
+            const { km, store } = mapFixture({
+                '42': { account, hasRefreshToken: true },
+            })
+            km.slots.set('user-42', { secret: PAIR })
+
+            await expect(store.active()).resolves.toEqual({ token: 'tok_a', account })
+        })
+
+        it.each([
+            ['a token that starts with a brace', '{not-json'],
+            ['JSON without token fields', '{"id":"tok_a"}'],
+        ])('active() treats %s as a bare access token', async (_name, secret) => {
+            const { km, store } = mapFixture({
+                '42': { account, hasRefreshToken: false },
+            })
+            km.slots.set('user-42', { secret })
+
+            await expect(store.active()).resolves.toEqual({ token: secret, account })
         })
 
         it('activeBundle skips the refresh-slot IPC when hasRefreshToken is false', async () => {

@@ -1,5 +1,6 @@
 import { CliError } from '../../errors.js'
 import type { AuthAccount, TokenBundle } from '../types.js'
+import { encodeSlotSecret } from './internal.js'
 import {
     type SecureStore,
     SECURE_STORE_RETRY_HINT,
@@ -81,26 +82,25 @@ export async function writeRecordWithKeyringFallback<TAccount extends AuthAccoun
 }
 
 /**
- * Two-slot write. Order: access slot → refresh slot → upsert → deferred
- * refresh wipe.
+ * Single-item write. Order: access slot → upsert → deferred refresh-slot
+ * wipe.
  *
  *   1. Validate `bundle.accessToken` (non-empty after trim).
- *   2. Under `'system'` or `'fallback'`, `accessStore.setSecret` runs.
- *      `'fallback'` degrades a `SecureStoreUnavailableError` to
- *      `fallbackToken`; `'system'` rejects it. `'plaintext'` writes the
- *      fallback field directly without calling the keyring.
- *   3. Under `'system'` or `'fallback'`, `refreshStore.setSecret` runs when
- *      `bundle.refreshToken` is present. Under `'fallback'`,
- *      `SecureStoreUnavailableError` degrades to `fallbackRefreshToken`; under
- *      `'system'`, it rolls back a successful access-slot write before
- *      rejecting. A non-keyring failure has the same rollback behavior.
- *   4. `userRecords.upsert(record)`. On failure, best-effort
- *      `Promise.allSettled` rollback of any slot writes that succeeded.
- *   5. Only after a successful non-plaintext upsert: if the bundle has no
- *      refresh token, wipe any orphan slot from a prior `setBundle`
- *      (best-effort). Doing this BEFORE the upsert would lose refresh state if
- *      the upsert then rejected — the new record's `hasRefreshToken` would
- *      still claim false but the old slot would be gone with no rollback path.
+ *   2. Under `'system'` or `'fallback'`, `accessStore.setSecret` runs once,
+ *      with both tokens encoded together when the bundle carries a refresh
+ *      token and the bare access token otherwise. `'fallback'` degrades a
+ *      `SecureStoreUnavailableError` to `fallbackToken` (and
+ *      `fallbackRefreshToken`); `'system'` rejects it. `'plaintext'` writes
+ *      the fallback fields directly without calling the keyring. A pair
+ *      too large for one Windows credential keeps the two-item layout: the
+ *      bare access token, then `refreshStore.setSecret`, with the same
+ *      fallback and rollback rules as the access write.
+ *   3. `userRecords.upsert(record)`. On failure, best-effort rollback of the
+ *      slot writes that succeeded.
+ *   4. Only after a successful non-plaintext upsert, and unless step 2 just
+ *      stored the refresh token there: wipe the refresh slot (best-effort).
+ *      It holds an orphan from an earlier write, which the new record
+ *      supersedes.
  *
  * Default promotion is external — preference, not correctness, and an
  * error there must not dirty up a successful credential write.
@@ -119,10 +119,16 @@ export async function writeBundleWithKeyringFallback<TAccount extends AuthAccoun
     }
     const refreshToken = bundle.refreshToken?.trim()
 
+    // Both tokens go into the access slot as one item, so a read needs one
+    // keyring access. A pair too large for every backend keeps the two-item
+    // layout instead: access slot plus refresh slot, read with two accesses.
+    const pair = refreshToken ? encodeSlotSecret(accessToken, refreshToken) : undefined
+    const splitRefresh = pair !== undefined && !fitsInOneCredential(pair)
+
     let accessStoredSecurely = false
     if (credentialStore !== 'plaintext') {
         try {
-            await accessStore.setSecret(accessToken)
+            await accessStore.setSecret(pair && !splitRefresh ? pair : accessToken)
             accessStoredSecurely = true
         } catch (error) {
             if (!(error instanceof SecureStoreUnavailableError)) throw error
@@ -130,21 +136,18 @@ export async function writeBundleWithKeyringFallback<TAccount extends AuthAccoun
         }
     }
 
-    let refreshStoredSecurely: boolean | undefined
-    if (refreshToken && credentialStore !== 'plaintext') {
+    let refreshStoredSecurely = refreshToken ? accessStoredSecurely : undefined
+    if (refreshToken && splitRefresh && accessStoredSecurely) {
         try {
             await refreshStore.setSecret(refreshToken)
-            refreshStoredSecurely = true
         } catch (error) {
             if (error instanceof SecureStoreUnavailableError && credentialStore === 'fallback') {
                 refreshStoredSecurely = false
             } else {
-                if (accessStoredSecurely) {
-                    try {
-                        await accessStore.deleteSecret()
-                    } catch {
-                        // best-effort
-                    }
+                try {
+                    await accessStore.deleteSecret()
+                } catch {
+                    // best-effort
                 }
                 if (error instanceof SecureStoreUnavailableError) {
                     throw credentialStoreUnavailableError()
@@ -152,9 +155,8 @@ export async function writeBundleWithKeyringFallback<TAccount extends AuthAccoun
                 throw error
             }
         }
-    } else if (refreshToken) {
-        refreshStoredSecurely = false
     }
+    const refreshInOwnSlot = splitRefresh && refreshStoredSecurely === true
 
     const record: UserRecord<TAccount> = {
         account,
@@ -176,18 +178,20 @@ export async function writeBundleWithKeyringFallback<TAccount extends AuthAccoun
     } catch (error) {
         const rollbacks: Promise<unknown>[] = []
         if (accessStoredSecurely) rollbacks.push(accessStore.deleteSecret())
-        if (refreshStoredSecurely === true) rollbacks.push(refreshStore.deleteSecret())
-        if (rollbacks.length > 0) {
-            await Promise.allSettled(rollbacks)
-        }
+        if (refreshInOwnSlot) rollbacks.push(refreshStore.deleteSecret())
+        await Promise.allSettled(rollbacks)
         throw error
     }
 
-    // Deferred: wipe any orphan refresh slot from a prior setBundle now
-    // that the new record (with `hasRefreshToken: false`) is durable. If
-    // this fails the gate already prevents readers from consulting it; the
-    // worst case is a stale keyring entry that `clear()` will pick up.
-    if (!refreshToken && credentialStore !== 'plaintext') {
+    // Deferred: wipe the refresh slot now that the new record is durable,
+    // unless this write just stored the refresh token there. Otherwise it
+    // holds either an orphan from a prior refresh-carrying write, or a
+    // refresh token that the access slot (or the record's plaintext field)
+    // now supersedes. Doing this before the upsert would lose refresh state
+    // if the upsert rejected. If it fails, readers never reach the slot while
+    // the access slot holds the pair or the `hasRefreshToken` gate is false;
+    // the worst case is a stale keyring entry that `clear()` will pick up.
+    if (credentialStore !== 'plaintext' && !refreshInOwnSlot) {
         try {
             await refreshStore.deleteSecret()
         } catch {
@@ -196,6 +200,18 @@ export async function writeBundleWithKeyringFallback<TAccount extends AuthAccoun
     }
 
     return { accessStoredSecurely, refreshStoredSecurely }
+}
+
+/**
+ * Windows Credential Manager caps a credential blob at 2,560 bytes, and the
+ * keyring backend stores the secret there as UTF-16, so two code units per
+ * JavaScript string unit. macOS and Secret Service allow far more. One
+ * limit for every platform keeps the stored layout the same everywhere.
+ */
+const CREDENTIAL_BLOB_LIMIT_BYTES = 2560
+
+function fitsInOneCredential(secret: string): boolean {
+    return secret.length * 2 <= CREDENTIAL_BLOB_LIMIT_BYTES
 }
 
 function credentialStoreUnavailableError(): CliError {
