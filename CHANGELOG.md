@@ -1,3 +1,9 @@
+## [2.0.3](https://github.com/todoist/cli-core/compare/v2.0.2...v2.0.3) (2026-11-26)
+
+### Bug Fixes
+
+* **auth:** store access and refresh tokens in one keychain item ([#190](https://github.com/todoist/cli-core/issues/190)) ([b30e6b6](https://github.com/todoist/cli-core/commit/b30e6b61af922e0d6e6d4a15c04342f437975246))
+
 ## [2.0.2](https://github.com/todoist/cli-core/compare/v2.0.1...v2.0.2) (2026-11-25)
 
 ### Bug Fixes
